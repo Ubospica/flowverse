@@ -353,7 +353,9 @@ async def test_what_the_compiler_declares() -> None:
         ("human", True, ()),
     ]
     (critic,) = [role for role in declared.agents if role.name == "critic"]
-    assert critic.permission == Permission(local=PermissionKind.READ)
+    assert critic.permission == Permission(
+        local=PermissionKind.READ, online=PermissionKind.NONE
+    )
     (workspace,) = declared.envs
     assert workspace.name == "workspace"
     assert workspace.auto

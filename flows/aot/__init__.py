@@ -48,7 +48,7 @@ class Writer(Agent):
 
 
 class Critic(Agent):
-    _permission = Permission(local=PermissionKind.READ)
+    _permission = Permission(local=PermissionKind.READ, online=PermissionKind.NONE)
     _skills = ("writing-flows",)
 
 
