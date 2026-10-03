@@ -14,7 +14,8 @@ with the same project files and evaluator arguments.
 
 ## Install
 
-Install a KCoral client with `kcoral run shell` on the agent machine's `PATH`.
+On the agent machine, install the client with `pip install kcoral` and keep
+`kcoral` on `PATH`.
 Install the server and your evaluator's dependencies on the GPU machine, then
 start it once (or use an existing server or Router):
 
