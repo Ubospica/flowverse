@@ -39,12 +39,34 @@ class GateConfig(BaseModel):
         return value.rstrip("/")
 
 
+#: What the actor is told about submitting, appended to the task.
+INSTRUCTIONS = (
+    "Submit prediction files with "
+    "`python3 .fixed-interrupt/submit.py submit PATH.csv`; use its `validate` command "
+    "for format validation. Evaluator feedback is blind."
+)
+
+
 class Gate:
+    candidate_suffix = ".csv"
+    instructions = INSTRUCTIONS
+
     def __init__(self, config: GateConfig):
         self.config = config
         self.key = config.control_key_file.read_text().strip()
         if len(self.key) < 32:
             raise ValueError("control key must contain at least 32 characters")
+
+    @property
+    def route_url(self) -> str:
+        """Where the actor's `submit.py` reaches the evaluator."""
+        return self.config.url
+
+    def start(self) -> None:
+        """The native evaluator is a service of its own, started beside the flow."""
+
+    def stop(self) -> None:
+        pass
 
     async def call(self, operation: str, payload: dict, timeout: float = 5) -> dict:
         def request() -> dict:

@@ -10,12 +10,13 @@ from typing import Any
 
 from hmz.flows import FlowParams
 
-from .api import Params
-from .gate import Gate, GateConfig
+from .api import DEFAULT_TIME_LIMIT_SECONDS, Params
+from .flowbench import FlowBenchGate
+from .gate import INSTRUCTIONS, Gate, GateConfig
 from .storage import atomic_json
 
 
-def prompt_for(task: str, seconds: float) -> str:
+def prompt_for(task: str, seconds: float, instructions: str = INSTRUCTIONS) -> str:
     task = task.replace(
         "There is no medal-based stopping condition and no submission quota.",
         "There is no medal-based stopping condition.",
@@ -24,9 +25,7 @@ def prompt_for(task: str, seconds: float) -> str:
         raise ValueError("task contains an incompatible submission-quota claim")
     return (
         f"{task}\n\nThe whole task has a {seconds:g}-second wall-clock budget. "
-        "Keep work and checkpoints in this shared workspace. Submit prediction files with "
-        "`python3 .fixed-interrupt/submit.py submit PATH.csv`; use its `validate` command "
-        "for format validation. Evaluator feedback is blind.\n"
+        f"Keep work and checkpoints in this shared workspace. {instructions}\n"
     )
 
 
@@ -99,7 +98,7 @@ async def run_turn(
         )
     started = time.time()
     try:
-        atomic_json(route, {"url": gate.config.url, "token": opened["token"]})
+        atomic_json(route, {"url": gate.route_url, "token": opened["token"]})
         reason = await watch_turn(
             turn(
                 prompt,
@@ -130,10 +129,8 @@ async def run_turn(
     }
 
 
-def trusted_paths(params: Params, workspace: Path) -> tuple[Path, GateConfig]:
-    root = Path(params.run_dir)
-    config_path = Path(params.gate_config)
-    for path in (root, config_path):
+def outside(paths: tuple[Path, ...], workspace: Path) -> None:
+    for path in paths:
         if (
             not path.is_absolute()
             or path.is_symlink()
@@ -142,6 +139,32 @@ def trusted_paths(params: Params, workspace: Path) -> tuple[Path, GateConfig]:
             raise ValueError(
                 "controller paths must be absolute and outside the agent workspace"
             )
+
+
+def run_root(params: Params, owner: str) -> Path:
+    if params.run_dir is not None:
+        return Path(params.run_dir)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return Path.home() / ".fixed_interrupt_flame_chase" / f"{stamp}-{owner[:8]}"
+
+
+def time_limit(params: Params, ctx: Any) -> float:
+    """The params' wall clock, else the run budget's duration, else six hours."""
+    if params.active_time_limit_seconds is not None:
+        return params.active_time_limit_seconds
+    duration = getattr(getattr(ctx, "budget", None), "duration", None)
+    if duration is not None:
+        return duration.total_seconds()
+    return DEFAULT_TIME_LIMIT_SECONDS
+
+
+def trusted_paths(
+    params: Params, workspace: Path, owner: str
+) -> tuple[Path, GateConfig]:
+    root = run_root(params, owner)
+    assert params.gate_config is not None
+    config_path = Path(params.gate_config)
+    outside((root, config_path), workspace)
     config = GateConfig.model_validate_json(config_path.read_text())
     for path in (config.control_key_file, config.ledger_file, config.candidates_dir):
         if (
@@ -155,36 +178,96 @@ def trusted_paths(params: Params, workspace: Path) -> tuple[Path, GateConfig]:
     return root, config
 
 
+def admission(params: Params, workspace: Path, owner: str) -> tuple[Path, Any]:
+    """The run directory and the gate: native MLE with a gate config, else FlowBench."""
+    if params.gate_config is not None:
+        root, config = trusted_paths(params, workspace, owner)
+        gate = Gate(config)
+        if gate.records():
+            raise ValueError(
+                "fixed_interrupt_flame_chase requires a fresh evaluator ledger"
+            )
+        return root, gate
+    root = run_root(params, owner)
+    outside((root,), workspace)
+    return root, FlowBenchGate(
+        workspace=workspace,
+        evaluator_url=params.evaluator_url,
+        store=root,
+        build_timeout=params.build_timeout_seconds,
+    )
+
+
 async def execute(
-    task: str, agents: Any, envs: Any, params: Params, *, turn: Any
+    task: str, agents: Any, envs: Any, params: Params, *, ctx: Any, turn: Any
 ) -> dict:
     workspace = Path(envs["workspace"].workdir).resolve()
-    root, config = trusted_paths(params, workspace)
-    gate = Gate(config)
-    if gate.records():
-        raise ValueError(
-            "fixed_interrupt_flame_chase requires a fresh evaluator ledger"
-        )
-    prompt = prompt_for(task, params.active_time_limit_seconds)
+    total = time_limit(params, ctx)
+    params.check_reserves(total)
+    owner = secrets.token_hex(16)
+    root, gate = admission(params, workspace, owner)
+    native = params.gate_config is not None
+    prompt = prompt_for(task, total, gate.instructions)
     root.mkdir(parents=True, exist_ok=False)
     shared = workspace / ".fixed-interrupt"
     # An existing route/ballot might be from an overlapping or interrupted run.
+    # A FlowBench worker that is restarted starts a new run in a new container
+    # process tree, so what the last one left there is stale rather than live.
+    if not native and shared.is_dir() and not shared.is_symlink():
+        shutil.rmtree(shared)
     shared.mkdir(exist_ok=False)
     shutil.copyfile(Path(__file__).parents[1] / "submit.py", shared / "submit.py")
     route = shared / "route.json"
     started = time.time()
-    deadline = started + params.active_time_limit_seconds
+    deadline = started + total
     exploration_end = deadline - params.review_reserve_seconds
-    owner = secrets.token_hex(16)
     atomic_json(
         root / "contract.json",
         {
             **params.model_dump(),
+            "backend": "native" if native else "flowbench",
+            "active_time_limit_seconds": total,
+            "run_dir": str(root),
             "started_epoch": started,
             "deadline_epoch": deadline,
             "owner": owner,
         },
     )
+    gate.start()
+    try:
+        return await explore_and_review(
+            gate=gate,
+            route=route,
+            shared=shared,
+            root=root,
+            turn=turn,
+            agents=agents,
+            envs=envs,
+            params=params,
+            prompt=prompt,
+            owner=owner,
+            deadline=deadline,
+            exploration_end=exploration_end,
+        )
+    finally:
+        gate.stop()
+
+
+async def explore_and_review(
+    *,
+    gate: Any,
+    route: Path,
+    shared: Path,
+    root: Path,
+    turn: Any,
+    agents: Any,
+    envs: Any,
+    params: Params,
+    prompt: str,
+    owner: str,
+    deadline: float,
+    exploration_end: float,
+) -> dict:
     turns: list[dict] = []
     authors: dict[str, int] = {}
     records: list[dict] = []
@@ -244,9 +327,9 @@ async def execute(
                 (review_dir / "candidates").mkdir(parents=True)
                 ballot = []
                 for n, record in enumerate(records, 1):
-                    (review_dir / "candidates" / f"{n}.csv").write_bytes(
-                        gate.artifact(record)
-                    )
+                    (
+                        review_dir / "candidates" / f"{n}{gate.candidate_suffix}"
+                    ).write_bytes(gate.artifact(record))
                     ballot.append(
                         {
                             "submission_id": record["submission_id"],

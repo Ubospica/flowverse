@@ -19,6 +19,7 @@ loaded("fixed_interrupt_flame_chase")
 from fixed_interrupt_flame_chase._fixed_interrupt_flame_chase import runtime
 from fixed_interrupt_flame_chase._fixed_interrupt_flame_chase.api import Params
 from fixed_interrupt_flame_chase._fixed_interrupt_flame_chase.gate import (
+    INSTRUCTIONS,
     Gate,
     GateConfig,
 )
@@ -224,8 +225,12 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "time", SimpleNamespace(time=lambda: clock.now))
 
     class FakeGate:
+        candidate_suffix = ".csv"
+        instructions = INSTRUCTIONS
+
         def __init__(self, config):
             self.config = config
+            self.route_url = config.url
             self.rows = []
             self.calls = []
             self.active = None
@@ -237,6 +242,12 @@ def rig(tmp_path, monkeypatch):
 
         def artifact(self, row):
             return b"synthetic-candidate"
+
+        def start(self):
+            self.calls.append(("start", None))
+
+        def stop(self):
+            self.calls.append(("stop", None))
 
         async def call(self, op, payload, **_):
             self.calls.append((op, payload))

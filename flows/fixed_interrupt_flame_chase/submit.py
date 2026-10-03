@@ -20,8 +20,12 @@ def main() -> int:
     headers = {"X-Turn-Token": route["token"]}
     if args.command == "status":
         connection.request("GET", "/session/status", headers=headers)
+    elif args.artifact is None:
+        # A task that builds its own submission (FlowBench's submit.sh) takes none.
+        headers["Content-Length"] = "0"
+        connection.request("POST", f"/{args.command}", body=b"", headers=headers)
     else:
-        artifact = Path(args.artifact or "")
+        artifact = Path(args.artifact)
         if artifact.is_symlink() or not artifact.is_file():
             parser.error("artifact must be a regular file")
         headers.update(

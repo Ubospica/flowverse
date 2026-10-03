@@ -7,6 +7,23 @@ experiments**. One final review by the other author can select an older accepted
 candidate. The default is *k* = 5, six hours total, 900 seconds reserved for review,
 and at most 600 seconds of reviewer execution.
 
+It is `flame_chase` plus that interrupt, and the interrupt only needs something
+that counts accepted experiments. Two admission backends provide it, chosen by
+whether `gate_config` is given:
+
+| | native MLE (`gate_config` set) | FlowBench (`gate_config` unset) |
+|---|---|---|
+| Counts | the native evaluator's receipts | records the cell's evaluator scored without `report.error` |
+| Actor submits | `submit.py submit PATH.csv` | `submit.py submit` (builds with the workspace's `submit.sh`) |
+| Admission service | `evaluator.py`, started by you | a loopback service inside the flow process |
+| Candidate files | `<sha>.csv` in the native evaluator | `run_dir/candidates/<sha>` |
+| Leftover `.fixed-interrupt/` | refused | replaced (a restarted FlowBench worker starts a new run) |
+
+Every param has a default, so FlowBench, which passes no `-p`, can run it. The
+wall clock is `active_time_limit_seconds` when set, else the run budget's
+`duration` (FlowBench's `-c run.yaml`), else six hours; `run_dir` defaults to a
+new directory under `~/.fixed_interrupt_flame_chase/`.
+
 This is a native local flow integration. The paper's Docker runner additionally
 creates a new container and HOME for every option and isolates private evaluator
 files. `LocalEnv` does not provide those guarantees: native conversations are
@@ -156,6 +173,24 @@ Retain the failed-call evidence
 and inspect the authoritative ledger before treating such a run as a benchmark
 result.
 
+## FlowBench tasks
+
+Run it as any other FlowBench flow: no evaluator to start and no params. Each
+`submit.py submit` runs `bash submit.sh <tmp>` in the workspace, uploads what it
+wrote to `evaluator_url` (`http://evaluator`) exactly as the worker's own autoeval
+does, and answers with the evaluator's record. A build that fails, a record with
+an `error` in its report (aopt's penalty, kd's parity, ...), a duplicate of an
+accepted build, and a score that lands after its turn closed are not
+experiments. `submit.py validate` only builds. Final review re-uploads the
+nominated candidate so it is the cell's last record.
+
+The task's autoeval keeps running beside the flow and is not counted. The two
+run `submit.sh` in one workspace unordered, so a task's `submit.sh` must not write
+into the workspace it builds from (humanfia/flowbench-internal#58 makes aopt and
+swe_vllm_kv_cache_watermark hold to that).
+Feedback is whatever the task gives: the flow does not hide the evaluator's
+record, and aopt's own brief points actors at `/scores`.
+
 ## Outputs and checks
 
 `run_dir` contains `contract.json` (parameters and original deadline), `turns.json`
@@ -168,12 +203,13 @@ authoritative receipts and candidate hashes.
 From the flowverse checkout, with Humanize and pytest installed:
 
 ```bash
-python -m pytest tests/test_fixed_interrupt_flame_chase.py tests/test_simple_flows.py -q
+python -m pytest tests/test_fixed_interrupt_flame_chase.py tests/test_fixed_interrupt_flowbench.py tests/test_simple_flows.py -q
 ```
 
 These tests need no provider credentials, network services, Docker or GPU. They
 exercise the real native flow engine with fake agents, plus the actual admission
-wrapper with concurrent synthetic submissions. Live CLIs, paid model calls,
+wrapper with concurrent synthetic submissions, and the FlowBench backend over
+real HTTP against a fake FlowBench evaluator. Live CLIs, paid model calls,
 real benchmark grading and container isolation are not verified by these tests.
 
 The admission wrapper derives from

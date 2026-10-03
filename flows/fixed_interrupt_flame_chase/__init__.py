@@ -12,8 +12,12 @@ from ._fixed_interrupt_flame_chase.runtime import execute
 async def fixed_interrupt_flame_chase(
     task: str, *, agents: Agents, envs: Envs, params: Params, ctx: FlowContext
 ) -> dict:
-    """Hidden fixed-k interruption and one blind final-selection turn, within one wall budget."""
-    return await execute(task, agents, envs, params, turn=turn)
+    """Hidden fixed-k interruption and one blind final-selection turn, within one wall budget.
+
+    Experiments are admitted by the native MLE evaluator when `gate_config` is given,
+    and otherwise by a FlowBench cell's evaluator through the workspace's `submit.sh`.
+    """
+    return await execute(task, agents, envs, params, ctx=ctx, turn=turn)
 
 
 @flow(agents=TurnAgents, envs=Envs, params=FlowParams, hidden=True)
