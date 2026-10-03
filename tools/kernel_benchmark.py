@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
@@ -55,14 +56,14 @@ def copy_artifact(source: Path, destination: Path) -> None:
         raise ValueError(f"artifact is missing or not a regular file: {source}")
 
 
-def local(args: argparse.Namespace, command: list[str]) -> int:
-    """Run in the source bundle, then keep requested artifacts even after failure."""
+def run_command(command: list[str], cwd: Path, timeout: int | None = None) -> int:
+    """Wait for a command and clean up its process group when the caller stops."""
     with subprocess.Popen(
-        command, cwd=args.bundle, stdin=subprocess.DEVNULL, start_new_session=True
+        command, cwd=cwd, stdin=subprocess.DEVNULL, start_new_session=True
     ) as process:
         previous = signal.signal(signal.SIGTERM, terminate)
         try:
-            code = process.wait(timeout=args.timeout)
+            code = process.wait(timeout=timeout)
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
             code = 124 if isinstance(error, subprocess.TimeoutExpired) else 130
             print("benchmark interrupted or timed out", file=sys.stderr)
@@ -74,6 +75,12 @@ def local(args: argparse.Namespace, command: list[str]) -> int:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
             signal.signal(signal.SIGTERM, previous)
+    return code if code >= 0 else 128 - code
+
+
+def local(args: argparse.Namespace, command: list[str]) -> int:
+    """Run in the source bundle, then keep requested artifacts even after failure."""
+    code = run_command(command, args.bundle, args.timeout)
     if args.out:
         args.out.mkdir()
         for name in args.fetch:
@@ -83,15 +90,63 @@ def local(args: argparse.Namespace, command: list[str]) -> int:
                 if parent == args.bundle:
                     break
                 if parent.is_symlink():
-                    raise ValueError(
-                        f"artifact path contains a symbolic link: {parent}"
-                    )
+                    raise ValueError(f"artifact path contains a symbolic link: {parent}")
             copy_artifact(source, args.out / args.bundle.name / name)
-    return code if code >= 0 else 128 - code
+    return code
 
 
-def remote(args: argparse.Namespace, command: list[str]) -> NoReturn:
-    """Replace this process with the official client; never retry a benchmark here."""
+def snapshot(source: Path, destination: Path) -> None:
+    """Send working changes and untracked inputs, respecting a project's gitignore."""
+    excluded = {".git", ".venv", "venv", "node_modules", "__pycache__", ".humanize"}
+    listing = (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if shutil.which("git")
+        else None
+    )
+    if listing is not None and listing.returncode == 0:
+        paths = [Path(os.fsdecode(name)) for name in listing.stdout.split(b"\0") if name]
+    else:
+        paths = []
+        for parent, dirs, files in os.walk(source, followlinks=False):
+            dirs[:] = [name for name in dirs if name not in excluded]
+            for name in dirs:
+                if (Path(parent) / name).is_symlink():
+                    raise ValueError(f"input is a symbolic link: {Path(parent) / name}")
+            paths.extend((Path(parent) / name).relative_to(source) for name in files)
+    destination.mkdir()
+    for name in dict.fromkeys(paths):
+        if any(part in excluded for part in name.parts):
+            continue
+        path = source / name
+        # Git still lists tracked files deleted in the working tree.
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"input is not a regular file: {path}")
+        if any(parent.is_symlink() for parent in path.parents if parent != source):
+            raise ValueError(f"input path contains a symbolic link: {path}")
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def remote(args: argparse.Namespace, command: list[str]) -> int:
+    """Use the official client over a fresh project snapshot, without execution retries."""
     executable = shutil.which("kcoral")
     if executable is None:
         raise ValueError("kcoral is not installed; install the KCoral client on PATH")
@@ -103,8 +158,6 @@ def remote(args: argparse.Namespace, command: list[str]) -> NoReturn:
         "shell",
         "--timeout",
         str(args.timeout),
-        "--send",
-        str(args.bundle),
     ]
     if args.url:
         argv.extend(["--url", args.url])
@@ -125,7 +178,11 @@ def remote(args: argparse.Namespace, command: list[str]) -> NoReturn:
             *command,
         ]
     )
-    os.execv(executable, argv)
+    with tempfile.TemporaryDirectory(prefix="hmz-kcoral-") as temporary:
+        bundle = Path(temporary) / args.bundle.name
+        snapshot(args.bundle, bundle)
+        argv[5:5] = ["--send", str(bundle)]
+        return run_command(argv, args.bundle)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -137,13 +194,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--bundle",
-        required=True,
+        default=Path.cwd(),
         type=Path,
-        help="directory containing the evaluator, kernel and inputs",
+        help="project directory (default: current directory; respects .gitignore)",
     )
-    parser.add_argument(
-        "--url", help="existing KCoral server or Router; else KCORAL_URL"
-    )
+    parser.add_argument("--url", help="existing KCoral server or Router; else KCORAL_URL")
     parser.add_argument("--timeout", type=positive, default=300)
     parser.add_argument(
         "--fetch",
@@ -185,9 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.backend == "local" and args.url:
         parser.error("--url is only used by the kcoral backend")
     try:
-        return (
-            remote(args, command) if args.backend == "kcoral" else local(args, command)
-        )
+        return remote(args, command) if args.backend == "kcoral" else local(args, command)
     except (OSError, ValueError) as error:
         print(f"kernel benchmark: {error}", file=sys.stderr)
         return 1

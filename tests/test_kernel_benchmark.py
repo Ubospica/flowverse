@@ -42,9 +42,7 @@ def bundle(tmp_path):
 
 
 @pytest.mark.parametrize("code", [0, 7])
-def test_local_preserves_failure_streams_arguments_and_artifacts(
-    bundle, tmp_path, code
-):
+def test_local_preserves_failure_streams_arguments_and_artifacts(bundle, tmp_path, code):
     out = tmp_path / "artifacts"
     literal = "x; $(touch should-not-exist) ' quoted"
     result = run(
@@ -97,7 +95,11 @@ def test_remote_delegates_to_official_cli_with_literal_argv(bundle, tmp_path):
         env={"PATH": str(tmp_path), "HMZ_BENCHMARK_BACKEND": "kcoral"},
     )
     assert result.returncode == 7, result.stderr
-    assert json.loads(receipt.read_text()) == [
+    actual = json.loads(receipt.read_text())
+    assert Path(actual[5]).name == bundle.name
+    assert not Path(actual[5]).exists(), "temporary upload should be cleaned up"
+    actual[5] = str(bundle)
+    assert actual == [
         "run",
         "shell",
         "--timeout",
@@ -156,6 +158,44 @@ def test_missing_url_fails_before_invoking_the_client(bundle, tmp_path):
     assert "requires --url or KCORAL_URL" in result.stderr
     assert "client was invoked" not in result.stderr
     assert not (bundle / "results").exists()
+
+
+def test_default_project_upload_keeps_edits_and_omits_ignored_files(bundle, tmp_path):
+    subprocess.run(["git", "init", "-q", str(bundle)], check=True)
+    (bundle / ".gitignore").write_text("secret.txt\nresults/\n")
+    subprocess.run(["git", "-C", str(bundle), "add", "."], check=True)
+    (bundle / "helper.py").write_text("VALUE = 84\n")
+    (bundle / "new_input.txt").write_text("new input")
+    (bundle / "secret.txt").write_text("do not upload")
+    (bundle / ".venv").mkdir()
+    (bundle / ".venv" / "cache").write_text("do not upload")
+    client = tmp_path / "kcoral"
+    receipt = tmp_path / "snapshot.json"
+    client.write_text(
+        f"#!{sys.executable}\nimport json, pathlib, sys\n"
+        "root = pathlib.Path(sys.argv[sys.argv.index('--send') + 1])\n"
+        "files = {str(p.relative_to(root)): p.read_text() for p in root.rglob('*') if p.is_file()}\n"
+        f"pathlib.Path({str(receipt)!r}).write_text(json.dumps(files))\n"
+    )
+    client.chmod(0o700)
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "--backend", "kcoral", "--", "python", "evaluate.py"],
+        cwd=bundle,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+            "KCORAL_URL": "http://worker",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    files = json.loads(receipt.read_text())
+    assert files["helper.py"] == "VALUE = 84\n"
+    assert files["new_input.txt"] == "new input"
+    assert set(files) == {".gitignore", "helper.py", "evaluate.py", "new_input.txt"}
 
 
 def test_timeout_kills_local_descendants(bundle):
