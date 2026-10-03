@@ -65,6 +65,7 @@ python tools/kernel_benchmark.py --backend kcoral \
 
 The report is `/tmp/trial-001/experiment/results/report.json`. Choose a new
 output directory per trial; `--fetch` paths are relative to the project.
+Inside an agent turn, choose a new output under `.humanize/` to keep writes in its workspace.
 Ordinary exit codes and output are preserved, including artifacts after failure.
 There is no fallback to local execution or automatic benchmark retry. The
 server caps `--timeout` (default 300 seconds); interrupting the client may leave

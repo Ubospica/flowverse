@@ -53,7 +53,9 @@ async def kernel(
         "working files using .gitignore and skips .git, virtualenvs and tool caches. "
         "It uses the worker's installed dependencies; do not run GPU work locally "
         "when KCoral is selected. For remote result files, add --fetch PATH "
-        "--out NEW_DIRECTORY before --. The server remains user-managed."
+        "--out NEW_DIRECTORY before --. Use a new directory under .humanize/ "
+        "for downloads within workspace permissions, creating the parent if needed. "
+        "The server remains user-managed."
     )
     loop = load("ralph_loop")
     await loop(task, agents=agents, envs=envs, params=loop.expected_params())

@@ -232,12 +232,15 @@ def test_flow_termination_kills_the_local_evaluator(bundle):
 
 
 @pytest.mark.parametrize("code", [0, 7])
-def test_real_kcoral_execution_and_artifact_round_trip(bundle, tmp_path, code):
+@pytest.mark.parametrize("in_workspace", [False, True])
+def test_real_kcoral_execution_and_artifact_round_trip(bundle, tmp_path, code, in_workspace):
     """Opt in with a real client on PATH and a CPU or GPU KCoral endpoint."""
     url = os.environ.get("KCORAL_TEST_URL")
     if not url:
         pytest.skip("set KCORAL_TEST_URL to exercise a real KCoral server")
-    out = tmp_path / "remote-results"
+    parent = bundle / ".humanize" if in_workspace else tmp_path
+    parent.mkdir(exist_ok=True)
+    out = parent / "remote-results"
     result = run(
         bundle,
         "--backend",
@@ -334,3 +337,29 @@ def test_artifact_symlinks_are_refused(bundle, tmp_path):
     )
     assert result.returncode != 0
     assert "symbolic link" in result.stderr
+
+
+def test_local_artifacts_can_be_saved_within_the_agent_workspace(bundle):
+    out = bundle / "download"
+    result = run(
+        bundle, "--fetch", "results", "--out", str(out), "--", sys.executable, "evaluate.py", "0"
+    )
+    assert result.returncode == 0, result.stderr
+    assert (out / bundle.name / "results/report.json").is_file()
+
+
+def test_artifact_cannot_be_copied_recursively_into_itself(bundle):
+    (bundle / "results").mkdir()
+    result = run(
+        bundle,
+        "--fetch",
+        "results",
+        "--out",
+        str(bundle / "results/download"),
+        "--",
+        sys.executable,
+        "evaluate.py",
+        "0",
+    )
+    assert result.returncode == 2
+    assert "artifact being collected" in result.stderr

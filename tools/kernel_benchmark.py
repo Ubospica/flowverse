@@ -235,8 +235,10 @@ def main(argv: list[str] | None = None) -> int:
         args.out = args.out.absolute()
         if args.out.exists() or args.out.is_symlink() or not args.out.parent.is_dir():
             parser.error("--out must be new and its parent must exist")
-        if args.out.resolve().is_relative_to(args.bundle):
-            parser.error("--out must be outside the bundle")
+        if any(
+            args.out.resolve().is_relative_to(args.bundle / name) for name in args.fetch
+        ):
+            parser.error("--out must not be inside an artifact being collected")
     if args.backend == "local" and args.url:
         parser.error("--url is only used by the kcoral backend")
     try:
