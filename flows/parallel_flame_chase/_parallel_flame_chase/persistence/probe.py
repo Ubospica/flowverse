@@ -146,14 +146,19 @@ def snapshot(source: Path, destination: Path, size: int | None = None) -> bool:
     partial = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.partial")
     try:
         copied = False
-        if (copy := shutil.which("cp")) is not None:
+        copy = "/bin/cp" if sys.platform == "darwin" else shutil.which("cp")
+        if copy is not None:
+            flags = (
+                ["-a", "-c"]
+                if sys.platform == "darwin"
+                else ["--archive", "--reflink=auto"]
+            )
             partial.mkdir()
             try:
                 subprocess.run(
                     [
                         copy,
-                        "--archive",
-                        "--reflink=auto",
+                        *flags,
                         f"{source}{os.sep}.",
                         str(partial),
                     ],
